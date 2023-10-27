@@ -6,6 +6,9 @@ import asyncio
 import time
 import aiohttp
 import sys
+import os
+import json
+import configparser
 
 logging.basicConfig(
     level=logging.CRITICAL, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -14,6 +17,13 @@ log = logging.getLogger(__name__)
 
 
 SCAN_TIMEOUT = 0.5
+DEFAULT_INI = "defaults.ini"
+CONFIG_DIR = "config"
+
+HTTP_AUTH_CREDS = None  # tuple (username, password) or None
+DRY_RUN = False
+
+
 class HTTPCommandExeption(Exception):
     pass
 
@@ -64,10 +74,13 @@ async def scan(subnet, port):
     return result
 
 
-async def detect_power_plug(ip, username="", password=""):
+async def detect_power_plug(ip):
     """Detects if the IP is a power plug and returns a JSON status of it if it is"""
     url = f"http://{ip}/cm?cmnd=status%200"
-    auth = aiohttp.BasicAuth(username, password)
+    auth = None
+    if HTTP_AUTH_CREDS:
+        auth = aiohttp.BasicAuth(*HTTP_AUTH_CREDS)
+        log.debug(f"Using http auth.")
     async with aiohttp.ClientSession(auth=auth) as session:
         try:
             async with session.get(url) as resp:
@@ -120,7 +133,14 @@ async def send_http_command(ip, command):
     """Send a command over HTTP to the power plug"""
     url = f"http://{ip}/cm"
     params = {"cmnd": command}
-    async with aiohttp.ClientSession() as session:
+    auth = None
+    request_timeout = 5
+    if HTTP_AUTH_CREDS:
+        auth = aiohttp.BasicAuth(*HTTP_AUTH_CREDS)
+        log.debug(f"Using http auth.")
+    async with aiohttp.ClientSession(
+        auth=auth, timeout=aiohttp.ClientTimeout(total=request_timeout)
+    ) as session:
         try:
             async with session.get(url, params=params) as resp:
                 if resp.status == 200:
@@ -134,6 +154,137 @@ async def send_http_command(ip, command):
         except Exception as ex:
             log.debug(f"Error during command sending {ip}: {ex}")
             raise HTTPCommandExeption(f"Error during command sending {ip}: {ex}")
+
+
+def load_ini(mac):
+    """Load configuration from ini file and returns config parser instance"""
+    config = configparser.ConfigParser()
+    default_ini = os.path.join(CONFIG_DIR, DEFAULT_INI)
+    if os.path.isfile(default_ini):
+        log.debug(f"Loading default ini file {default_ini}")
+        config.read(default_ini)
+    else:
+        log.debug(f"Default ini file {default_ini} not found")
+    plug_ini = os.path.join(CONFIG_DIR, f"{mac}.ini")
+    if os.path.isfile(plug_ini):
+        log.debug(f"Loading plug ini file {plug_ini}")
+        config.read(plug_ini)
+    else:
+        log.error(f"Plug ini file {plug_ini} not found")
+        raise FileNotFoundError(f"Plug ini file {plug_ini} not found")
+    return config
+
+
+def ini2commands(config, sections=None):
+    """converts parsed ini file to commands for power plug"""
+    commands = []  # list of tuples (command:str, restart_required: bool)
+    command_sections = [
+        "wifi",
+        "management",
+        "mqtt",
+    ]  # sections converted to commands (attrs must be valid commands)
+    restart_sections = [
+        "wifi",
+        "mqtt",
+    ]  # sections that will cause device restart and we need to wait longer
+    sections_include = []
+    sections_exclude = []
+    if sections is not None:
+        for item in sections.strip().split(","):
+            if item.startswith("!"):
+                sections_exclude.append(item[1:])
+            else:
+                sections_include.append(item)
+    log.debug(f"Sections: include: {sections_include} exclude: {sections_exclude}")
+    for section in config.sections():
+        if section in sections_exclude or (
+            len(sections_include) and section not in sections_include
+        ):
+            log.debug(f"Skipping section {section}")
+            continue
+        if section in command_sections:
+            command = "Backlog "
+            for key, value in config[section].items():
+                command += f"{key} {value};"
+            if section in restart_sections:
+                command += "Restart 1;"
+            commands.append((command, section in restart_sections))
+            log.debug(f"Adding command: {command}")
+        else:
+            log.debug(f"Skipping non-command section {section}")
+    return commands
+
+
+def generate_config_ini(ip):
+    """generates basic configuration for the power plug that we want to edit later"""
+    status = asyncio.run(send_http_command(ip, "status 0"))
+    mac = get_mac(status)
+    plug_ini = os.path.join(CONFIG_DIR, f"{mac}.ini")
+    if os.path.isfile(plug_ini):
+        log.error(f"Plug ini file {plug_ini} already exists")
+        return
+    config = configparser.ConfigParser()
+    config["management"] = {}
+    config["management"]["devicename"] = f"Zasuvka-{mac[-6:]}"
+    config["management"]["friendlyname"] = f"Zasuvka-{mac[-6:]}"
+    config.write(open(plug_ini, "w"))
+    print(f"Config file {plug_ini} created")
+
+
+def setup_plug(ip, sections=None):
+    """Setup the power plug using ini file"""
+    status = asyncio.run(send_http_command(ip, "status 0"))
+    mac = get_mac(status)
+    config = load_ini(mac)
+    commands = ini2commands(config, sections=sections)
+    boot_count = int(status["StatusPRM"]["BootCount"])
+    log.debug(f"Boot count: {boot_count}")
+    for command, restart_required in commands:
+        if DRY_RUN:
+            print(f"would send command: {command}")
+        else:
+            print(f"Executing command: {command}")
+            asyncio.run(send_http_command(ip, command))
+            if restart_required:
+                print("Waiting for device restart.", end="")
+                max_attempts = 10
+                delay = 1
+                time.sleep(
+                    2
+                )  # wait for the device to start the restart, it's not instant, 1s is the default delay, so let's put 2 here
+                while True:
+                    try:
+                        status = asyncio.run(send_http_command(ip, "status 0"))
+                        if status:
+                            if int(status["StatusPRM"]["BootCount"]) > boot_count:
+                                print("Device restarted")
+                                boot_count = int(status["StatusPRM"]["BootCount"])
+                                break
+                            else:
+                                log.debug(
+                                    f"Device responding, but has not restarted yet."
+                                )
+
+                    except Exception as ex:
+                        log.debug(f"Error while waiting for device restart: {ex}")
+                    max_attempts -= 1
+                    if max_attempts == 0:
+                        print("Device restart timeout", file=sys.stderr)
+                        return False
+                    print(".", end="")
+                    time.sleep(delay)
+                if max_attempts < 1:
+                    print(
+                        "Device setup failed. Could not connect to device after restart.",
+                        file=sys.stderr,
+                    )
+
+
+def get_mac(status_json):
+    """Returns MAC address from the status json or raises KeyError"""
+    mac = status_json["StatusNET"]["Mac"]
+    mac = mac.replace(":", "")
+    return mac
 
 
 def arg_parser():
@@ -151,8 +302,8 @@ def arg_parser():
     parser.add_argument(
         "--username",
         type=str,
-        help="Username for power plug authentication.",
-        default="",
+        help="Username for power plug authentication. Default: admin.",
+        default="admin",
     )
     parser.add_argument(
         "--password",
@@ -174,24 +325,50 @@ def arg_parser():
         help="Setup power calibration on the power plug",
     )
     parser.add_argument("--ip", type=str, help="IP of the power plug")
+    parser.add_argument("--command", type=str, help="Command to send to the power plug")
+    parser.add_argument(
+        "--setup", metavar="IP", type=str, help="Setup the power plug using ini file"
+    )
+    parser.add_argument(
+        "--generate-config",
+        metavar="IP",
+        type=str,
+        help="Generate config file for the power plug",
+    )
+    parser.add_argument(
+        "--sections",
+        type=str,
+        help="Sections to process '!' negates the section, comma separated list. Default: all. Example: !wifi,management,!mqtt",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Dry run, no commands are sent to the device.",
+    )
 
     return parser
 
 
-async def main():
+def main():
+    global HTTP_AUTH_CREDS, DRY_RUN
     log.setLevel(logging.ERROR)
     parser = arg_parser()
     args = parser.parse_args()
     if args.debug:
         log.setLevel(logging.DEBUG)
+
+    if args.dry_run:
+        DRY_RUN = True
+        print("Dry run, no commands will be sent to the device.")
+
+    if args.password:
+        HTTP_AUTH_CREDS = (args.username, args.password)
     if args.scan:
         # scan for open ports, these are plug candidates
-        result = await scan(args.scan, 80)
-        username = args.username
-        password = args.password
+        result = asyncio.run(scan(args.scan, 80))
         # for all candidates, try to detect if they are power plugs
         for ip in result:
-            status_json = await detect_power_plug(ip, username, password)
+            status_json = asyncio.run(detect_power_plug(ip))
             if status_json:
                 extra_info = "No extra info could be parsed"
                 try:
@@ -212,14 +389,29 @@ async def main():
             print("IP is required for wifi setup")
             parser.print_help()
             sys.exit(1)
-        await setup_wifi(args.ip, *args.setup_wifi)
+        asyncio.run(setup_wifi(args.ip, *args.setup_wifi))
         return
     if args.power_calibration:
         if not args.ip:
             print("IP is required for power calibration")
             parser.print_help()
             sys.exit(1)
-        await power_calibration(args.ip, *args.power_calibration)
+        asyncio.run(power_calibration(args.ip, *args.power_calibration))
+        return
+    if args.command:
+        if not args.ip:
+            print("IP is required for sending a command")
+            parser.print_help()
+            sys.exit(1)
+        response = asyncio.run(send_http_command(args.ip, args.command))
+        response = json.dumps(response, indent=2)
+        print(response)
+        return
+    if args.setup:
+        setup_plug(args.setup, sections=args.sections)
+        return
+    if args.generate_config:
+        generate_config_ini(args.generate_config)
         return
     parser.print_help()
     sys.exit(1)
@@ -228,4 +420,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
