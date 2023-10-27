@@ -14,6 +14,8 @@ log = logging.getLogger(__name__)
 
 
 SCAN_TIMEOUT = 0.5
+class HTTPCommandExeption(Exception):
+    pass
 
 
 async def scan_host(host, port):
@@ -88,6 +90,52 @@ async def detect_power_plug(ip, username="", password=""):
             log.debug(f"Error during power plug detection at {ip}: {ex}")
 
 
+async def setup_wifi(ip, ssid, password):
+    """Setup wifi on the power plug"""
+    try:
+        await send_http_command(ip, f"Backlog SSID1 {ssid};Password1 {password}")
+        print("Wifi setup successfully")
+    except HTTPCommandExeption as ex:
+        log.error(f"Error during wifi setup {ip}: {ex}")
+        print("Command failed: ", ex)
+        return False
+
+
+async def power_calibration(ip, watt, miliamps, volts):
+    """
+    Setup calibration on the power plug using known values
+    for actual power consumption
+    """
+    command = f"Backlog PowerSet {watt};VoltageSet {volts};CurrentSet {miliamps};"
+    try:
+        await send_http_command(ip, command)
+        print("Power calibration set up successfully")
+    except HTTPCommandExeption as ex:
+        log.error(f"Error during power calibration {ip}: {ex}")
+        print("Command failed: ", ex)
+        return False
+
+
+async def send_http_command(ip, command):
+    """Send a command over HTTP to the power plug"""
+    url = f"http://{ip}/cm"
+    params = {"cmnd": command}
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, params=params) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    log.debug(f"GOOD Response from {ip}: {result}")
+                    return result
+                log.debug(f"Bad response from {ip}: {resp.status}: {resp.reason}")
+                raise HTTPCommandExeption(
+                    f"Bad response from {ip}: {resp.status}: {resp.reason}"
+                )
+        except Exception as ex:
+            log.debug(f"Error during command sending {ip}: {ex}")
+            raise HTTPCommandExeption(f"Error during command sending {ip}: {ex}")
+
+
 def arg_parser():
     import argparse
 
@@ -113,6 +161,19 @@ def arg_parser():
         default="",
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument(
+        "--setup-wifi",
+        help="Setup wifi on the power plug",
+        nargs=2,
+        metavar=("SSID", "PASSWORD"),
+    )
+    parser.add_argument(
+        "--power-calibration",
+        nargs=3,
+        metavar=("WATT", "MILIAMPS", "VOLTS"),
+        help="Setup power calibration on the power plug",
+    )
+    parser.add_argument("--ip", type=str, help="IP of the power plug")
 
     return parser
 
@@ -145,6 +206,20 @@ async def main():
                     pass
 
                 print(f"Power plug detected at {ip}: {extra_info}")
+        return
+    if args.setup_wifi:
+        if not args.ip:
+            print("IP is required for wifi setup")
+            parser.print_help()
+            sys.exit(1)
+        await setup_wifi(args.ip, *args.setup_wifi)
+        return
+    if args.power_calibration:
+        if not args.ip:
+            print("IP is required for power calibration")
+            parser.print_help()
+            sys.exit(1)
+        await power_calibration(args.ip, *args.power_calibration)
         return
     parser.print_help()
     sys.exit(1)
