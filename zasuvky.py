@@ -287,6 +287,22 @@ def get_mac(status_json):
     return mac
 
 
+def reset_counters(ip):
+    """Resets energy consumption counters to 0"""
+    try:
+        result = asyncio.run(
+            send_http_command(
+                ip, "Backlog EnergyToday 0;EnergyTotal 0; EnergyYesterday 0;"
+            )
+        )
+        log.debug(f"Reset counters result: {result}")
+        print("Counters reset successfully")
+    except Exception as ex:
+        log.error(f"Error during counters reset {ip}: {ex}")
+        print("Command failed: ", ex, file=sys.stderr)
+        return False
+
+
 def arg_parser():
     import argparse
 
@@ -343,7 +359,12 @@ def arg_parser():
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Dry run, no commands are sent to the device.",
+        help="Dry run, no commands are sent to the device. Works only for --setup.",
+    )
+    parser.add_argument(
+        "--reset-counters",
+        action="store_true",
+        help="Reset energy consumption counters to 0",
     )
 
     return parser
@@ -363,6 +384,17 @@ def main():
 
     if args.password:
         HTTP_AUTH_CREDS = (args.username, args.password)
+
+    if args.reset_counters:
+        if not args.ip:
+            print("IP is required for counters reset")
+            parser.print_help()
+            sys.exit(1)
+        result = reset_counters(args.ip)
+        if result is False:
+            sys.exit(1)
+        return
+
     if args.scan:
         # scan for open ports, these are plug candidates
         result = asyncio.run(scan(args.scan, 80))
