@@ -19,6 +19,7 @@ log = logging.getLogger(__name__)
 SCAN_TIMEOUT = 0.5
 DEFAULT_INI = "defaults.ini"
 CONFIG_DIR = "config"
+BACKUP_DIR = "backup"
 
 HTTP_AUTH_CREDS = None  # tuple (username, password) or None
 DRY_RUN = False
@@ -227,6 +228,8 @@ def generate_config_ini(ip):
     config["management"] = {}
     config["management"]["devicename"] = f"Zasuvka-{mac[-6:]}"
     config["management"]["friendlyname"] = f"Zasuvka-{mac[-6:]}"
+    if not os.path.isdir(CONFIG_DIR):
+        os.mkdir(CONFIG_DIR)
     config.write(open(plug_ini, "w"))
     print(f"Config file {plug_ini} created")
 
@@ -278,6 +281,7 @@ def setup_plug(ip, sections=None):
                         "Device setup failed. Could not connect to device after restart.",
                         file=sys.stderr,
                     )
+                    return False
 
 
 def get_mac(status_json):
@@ -299,6 +303,66 @@ def reset_counters(ip):
         print("Counters reset successfully")
     except Exception as ex:
         log.error(f"Error during counters reset {ip}: {ex}")
+        print("Command failed: ", ex, file=sys.stderr)
+        return False
+
+
+def backup_config(ip):
+    """Downloads binary config dump from the power plug"""
+    if not os.path.isdir(BACKUP_DIR):
+        os.mkdir(BACKUP_DIR)
+    auth = None
+    if HTTP_AUTH_CREDS:
+        auth = aiohttp.BasicAuth(*HTTP_AUTH_CREDS)
+        log.debug(f"Using http auth.")
+    url = f"http://{ip}/dl"
+    status = asyncio.run(send_http_command(ip, "status 0"))
+    mac = get_mac(status)
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+
+    async def dl_firmware():
+        async with aiohttp.ClientSession(auth=auth) as session:
+            try:
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        filename = f"{mac}-{timestamp}.dmp"
+                        filepath = os.path.join(BACKUP_DIR, filename)
+                        with open(filepath, "wb") as f:
+                            f.write(await resp.read())
+                        print(f"Config backup saved to {filepath}")
+                    else:
+                        print(
+                            f"Bad response from {ip}: {resp.status}: {resp.reason}",
+                            file=sys.stderr,
+                        )
+            except Exception as ex:
+                print(f"Error during config backup {ip}: {ex}", file=sys.stderr)
+                return False
+
+    return asyncio.run(dl_firmware())
+
+
+def upgrade_firmware(ip):
+    """Upgrades firmware using the url stored in the power plug"""
+    status = asyncio.run(send_http_command(ip, "status 0"))
+    mac = get_mac(status)
+    url = status["StatusPRM"]["OtaUrl"]
+    if not url:
+        print("No upgrade url found", file=sys.stderr)
+        return False
+    print("Backing up running configuration...")
+    if backup_config(ip) is False:
+        print("Backup failed, aborting firmware upgrade", file=sys.stderr)
+        return False
+    print(f"Sending command to upgrade firmware from {url}")
+    try:
+        result = asyncio.run(send_http_command(ip, f"Upgrade 1"))
+        log.debug(f"Upgrade result: {result}")
+        print(
+            "Upgrade command sent successfully. Wait for the device to reboot, it might take a couple of minutes."
+        )
+    except Exception as ex:
+        log.error(f"Error during firmware upgrade {ip}: {ex}")
         print("Command failed: ", ex, file=sys.stderr)
         return False
 
@@ -366,6 +430,12 @@ def arg_parser():
         action="store_true",
         help="Reset energy consumption counters to 0",
     )
+    parser.add_argument(
+        "--backup-config", action="store_true", help="Backup config from the device"
+    )
+    parser.add_argument(
+        "--upgrade-firmware", action="store_true", help="Upgrade firmware"
+    )
 
     return parser
 
@@ -385,6 +455,25 @@ def main():
     if args.password:
         HTTP_AUTH_CREDS = (args.username, args.password)
 
+    if args.upgrade_firmware:
+        if not args.ip:
+            print("IP is required for firmware upgrade")
+            parser.print_help()
+            sys.exit(1)
+        result = upgrade_firmware(args.ip)
+        if result is False:
+            sys.exit(1)
+        return
+
+    if args.backup_config:
+        if not args.ip:
+            print("IP is required for config backup")
+            parser.print_help()
+            sys.exit(1)
+        result = backup_config(args.ip)
+        if result is False:
+            sys.exit(1)
+        return
     if args.reset_counters:
         if not args.ip:
             print("IP is required for counters reset")
@@ -440,7 +529,9 @@ def main():
         print(response)
         return
     if args.setup:
-        setup_plug(args.setup, sections=args.sections)
+        result = setup_plug(args.setup, sections=args.sections)
+        if result is False:
+            sys.exit(1)
         return
     if args.generate_config:
         generate_config_ini(args.generate_config)
