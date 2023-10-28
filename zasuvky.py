@@ -121,17 +121,6 @@ async def detect_power_plug(ip):
             log.debug(f"Error during power plug detection at {ip}: {ex}")
 
 
-async def setup_wifi(ip, ssid, password):
-    """Setup wifi on the power plug"""
-    try:
-        await send_http_command(ip, f"Backlog SSID1 {ssid};Password1 {password}")
-        print("Wifi setup successfully")
-    except HTTPCommandExeption as ex:
-        log.error(f"Error during wifi setup {ip}: {ex}")
-        print("Command failed: ", ex)
-        return False
-
-
 def power_calibration(ip, watt, miliamps, volts, save_to_ini=True):
     """
     Setup calibration on the power plug using known values
@@ -477,12 +466,6 @@ def arg_parser():
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument(
-        "--setup-wifi",
-        help="Setup wifi on the power plug",
-        nargs=2,
-        metavar=("SSID", "PASSWORD"),
-    )
-    parser.add_argument(
         "--power-calibration",
         nargs=3,
         metavar=("WATT", "MILIAMPS", "VOLTS"),
@@ -610,13 +593,7 @@ def main():
 
                 print(f"Power plug detected at {ip}: {extra_info}")
         return
-    if args.setup_wifi:
-        if not args.ip:
-            print("IP is required for wifi setup")
-            parser.print_help()
-            sys.exit(1)
-        asyncio.run(setup_wifi(args.ip, *args.setup_wifi))
-        return
+
     if args.power_calibration:
         if not args.ip:
             print("IP is required for power calibration")
