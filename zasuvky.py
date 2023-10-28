@@ -115,15 +115,47 @@ async def setup_wifi(ip, ssid, password):
         return False
 
 
-async def power_calibration(ip, watt, miliamps, volts):
+def power_calibration(ip, watt, miliamps, volts, save_to_ini=True):
     """
     Setup calibration on the power plug using known values
     for actual power consumption
     """
     command = f"Backlog PowerSet {watt};VoltageSet {volts};CurrentSet {miliamps};"
     try:
-        await send_http_command(ip, command)
+        asyncio.run(send_http_command(ip, command))
+        time.sleep(
+            2
+        )  # wait for values propagation, reading them immediately will read old values
         print("Power calibration set up successfully")
+        cal_data = {}
+        for command in ["PowerCal", "VoltageCal", "CurrentCal"]:
+            result = asyncio.run(send_http_command(ip, command))
+            cal_data[command] = result[command]
+            print(f"{command} result: {result}")
+        if save_to_ini:
+            status = asyncio.run(send_http_command(ip, "status 0"))
+            mac = get_mac(status)
+            plug_ini = os.path.join(CONFIG_DIR, f"{mac}.ini")
+            if os.path.isfile(plug_ini):
+                log.debug(f"Loading plug ini file {plug_ini}")
+                config = configparser.ConfigParser()
+                timestamp = time.strftime("%Y%m%d-%H%M%S")
+                config.read(plug_ini)
+                config.write(open(plug_ini + f"-backup-{timestamp}", "w"))
+                if "power" not in config.sections():
+                    config["power"] = {}
+                config["power"]["powercal"] = str(cal_data["PowerCal"])
+                config["power"]["voltagecal"] = str(cal_data["VoltageCal"])
+                config["power"]["currentcal"] = str(cal_data["CurrentCal"])
+                config.write(open(plug_ini, "w"))
+                print(f"Config file {plug_ini} updated.")
+            else:
+                print(
+                    f"Config file {plug_ini} not found and could not be updated",
+                    file=sys.stderr,
+                )
+                return False
+
     except HTTPCommandExeption as ex:
         log.error(f"Error during power calibration {ip}: {ex}")
         print("Command failed: ", ex)
@@ -183,10 +215,12 @@ def ini2commands(config, sections=None):
         "wifi",
         "management",
         "mqtt",
+        "power",
     ]  # sections converted to commands (attrs must be valid commands)
     restart_sections = [
-        "wifi",
         "mqtt",
+        # wifi not here, as we do not want to wait for it, since it is going
+        # to appear with a different IP
     ]  # sections that will cause device restart and we need to wait longer
     sections_include = []
     sections_exclude = []
@@ -197,7 +231,12 @@ def ini2commands(config, sections=None):
             else:
                 sections_include.append(item)
     log.debug(f"Sections: include: {sections_include} exclude: {sections_exclude}")
-    for section in config.sections():
+    config_sections = config.sections()
+    if "wifi" in config_sections:
+        # wifi section must be last, as the device restarts with different IP (likely)
+        config_sections.remove("wifi")
+        config_sections.append("wifi")
+    for section in config_sections:
         if section in sections_exclude or (
             len(sections_include) and section not in sections_include
         ):
@@ -238,7 +277,15 @@ def setup_plug(ip, sections=None):
     """Setup the power plug using ini file"""
     status = asyncio.run(send_http_command(ip, "status 0"))
     mac = get_mac(status)
-    config = load_ini(mac)
+    try:
+        config = load_ini(mac)
+    except FileNotFoundError as ex:
+        log.info(f"Plug ini file not found, generating one.")
+        log.warning(
+            "New config file was generated. Please make sure you run the power calibration for the powerplug!"
+        )
+        generate_config_ini(ip)
+        config = load_ini(mac)
     commands = ini2commands(config, sections=sections)
     boot_count = int(status["StatusPRM"]["BootCount"])
     log.debug(f"Boot count: {boot_count}")
@@ -249,7 +296,7 @@ def setup_plug(ip, sections=None):
             print(f"Executing command: {command}")
             asyncio.run(send_http_command(ip, command))
             if restart_required:
-                print("Waiting for device restart.", end="")
+                print("Waiting for device restart.", end="", flush=True)
                 max_attempts = 10
                 delay = 1
                 time.sleep(
@@ -274,7 +321,7 @@ def setup_plug(ip, sections=None):
                     if max_attempts == 0:
                         print("Device restart timeout", file=sys.stderr)
                         return False
-                    print(".", end="")
+                    print(".", end="", flush=True)
                     time.sleep(delay)
                 if max_attempts < 1:
                     print(
@@ -452,6 +499,10 @@ def main():
         DRY_RUN = True
         print("Dry run, no commands will be sent to the device.")
 
+    if os.environ.get("HTTP_AUTH_PASSWORD"):
+        log.debug("Using http auth from environment")
+        HTTP_AUTH_CREDS = ("admin", os.environ.get("HTTP_AUTH_PASSWORD"))
+
     if args.password:
         HTTP_AUTH_CREDS = (args.username, args.password)
 
@@ -517,7 +568,7 @@ def main():
             print("IP is required for power calibration")
             parser.print_help()
             sys.exit(1)
-        asyncio.run(power_calibration(args.ip, *args.power_calibration))
+        power_calibration(args.ip, *args.power_calibration)
         return
     if args.command:
         if not args.ip:
