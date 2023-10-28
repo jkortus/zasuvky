@@ -75,6 +75,21 @@ async def scan(subnet, port):
     return result
 
 
+async def detect_power_plug_parallel(ips):
+    """
+    runs detect_power_plug calls in parallel for all ips and returns a list of results
+    as tuple (ip, results_json)
+    """
+    results = []
+    tasks = []
+    async with asyncio.TaskGroup() as tg:
+        for ip in ips:
+            task = tg.create_task(detect_power_plug(ip))
+            tasks.append((ip, task))
+    results = [(ip, task.result()) for ip, task in tasks]
+    return results
+
+
 async def detect_power_plug(ip):
     """Detects if the IP is a power plug and returns a JSON status of it if it is"""
     url = f"http://{ip}/cm?cmnd=status%200"
@@ -539,16 +554,18 @@ def main():
         # scan for open ports, these are plug candidates
         result = asyncio.run(scan(args.scan, 80))
         # for all candidates, try to detect if they are power plugs
-        for ip in result:
-            status_json = asyncio.run(detect_power_plug(ip))
+        results = asyncio.run(detect_power_plug_parallel(result))
+        for ip, status_json in results:
             if status_json:
                 extra_info = "No extra info could be parsed"
                 try:
-                    extra_info = f"DeviceName: {status_json['Status']['DeviceName']}"
+                    extra_info = f"{status_json['StatusSNS']['ENERGY']['Power']:4d} W"
                     extra_info += (
-                        f" FriendlyName: {status_json['Status']['FriendlyName']}"
+                        f" DeviceName: {status_json['Status']['DeviceName']:15s}"
                     )
-                    extra_info += f" Power: {status_json['Status']['Power']}"
+                    extra_info += (
+                        f" FriendlyName: {status_json['Status']['FriendlyName'][0]:15s}"
+                    )
                     extra_info += f" MAC: {status_json['StatusNET']['Mac']}"
                     extra_info += f" Version: {status_json['StatusFWR']['Version']}"
                 except KeyError:
