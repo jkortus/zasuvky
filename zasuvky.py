@@ -9,6 +9,8 @@ import sys
 import os
 import json
 import configparser
+import psutil
+import ipaddress
 
 logging.basicConfig(
     level=logging.CRITICAL, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -429,6 +431,23 @@ def upgrade_firmware(ip):
         return False
 
 
+def get_host_networks():
+    """returns a list of host ipv4 networks"""
+    ifaces = psutil.net_if_addrs()
+    addresses = []
+    for iface in ifaces:
+        for addr in ifaces[iface]:
+            if addr.family == socket.AF_INET:  # ipv4 only
+                if addr.address.startswith("127."):
+                    continue
+                addresses.append((addr.address, addr.netmask))
+    networks = []
+    for address in addresses:
+        network = ipaddress.ip_network(address[0] + "/" + address[1], strict=False)
+        networks.append(network)
+    return networks
+
+
 def arg_parser():
     import argparse
 
@@ -439,7 +458,10 @@ def arg_parser():
         "--scan",
         type=str,
         metavar="IP spec",
-        help="Scans the network/ip for available power plugs.",
+        nargs="?",
+        const=True,
+        default=None,
+        help="Scans the network/ip for available power plugs. Tries scanning current network if there is only one available.",
     )
     parser.add_argument(
         "--username",
@@ -551,8 +573,23 @@ def main():
         return
 
     if args.scan:
+        if args.scan is True:
+            # present with no argument - let's find the network
+            networks = get_host_networks()
+            log.debug(f"Found networks: {networks}")
+            if len(networks) != 1:
+                print(
+                    f"Could not determine the network to scan. Please specify the network to scan.",
+                    file=sys.stderr,
+                )
+                print(f"Available networks: {networks}", file=sys.stderr)
+                sys.exit(1)
+            network = networks[0]
+        else:
+            network = args.scan
+        print(f"Scanning network {network}")
         # scan for open ports, these are plug candidates
-        result = asyncio.run(scan(args.scan, 80))
+        result = asyncio.run(scan(network, 80))
         # for all candidates, try to detect if they are power plugs
         results = asyncio.run(detect_power_plug_parallel(result))
         for ip, status_json in results:
