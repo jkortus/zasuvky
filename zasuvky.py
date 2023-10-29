@@ -540,8 +540,7 @@ def arg_parser():
     )
     parser.add_argument(
         "--generate-config",
-        metavar="IP",
-        type=str,
+        action="store_true",
         help="Generate config file for the power plug",
     )
     parser.add_argument(
@@ -703,7 +702,11 @@ def main():
             sys.exit(1)
         return
     if args.generate_config:
-        generate_config_ini(args.generate_config)
+        if not ip:
+            print("IP is required for generating config", file=sys.stderr)
+            parser.print_help()
+            sys.exit(1)
+        generate_config_ini(ip)
         return
     parser.print_help()
     sys.exit(1)
