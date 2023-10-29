@@ -168,6 +168,66 @@ def power_calibration(ip, watt, miliamps, volts, save_to_ini=True):
         return False
 
 
+async def send_http_command_parallel(ips, command):
+    """
+    runs send_http_command calls in parallel for all ips and returns a list of results
+    as tuple (ip, results_json)
+    """
+    results = []
+    tasks = []
+    async with asyncio.TaskGroup() as tg:
+        for ip in ips:
+            task = tg.create_task(send_http_command(ip, command))
+            tasks.append((ip, task))
+    results = [(ip, task.result()) for ip, task in tasks]
+    return results
+
+
+def name2ip(name, network=None):
+    """
+    Returns IP address of a plug with a given devicename or firendlyname.
+    Raises ValueError if not found or any other error is encountered.
+    Matches on substring of both and requires unique match across all plugs.
+    network is optional, taking form of "10.0.2.1/24"
+    """
+    # scan first
+    if network is None:
+        networks = get_host_networks()
+        log.debug(f"Found networks: {networks}")
+        if len(networks) != 1:
+            msg = "Could not determine the network to scan. Multiple are available."
+            msg += f"Available networks: {networks}"
+            raise ValueError(msg)
+        network = networks[0]
+    scan_results = asyncio.run(scan(network, 80))
+    # for all candidates, try to detect if they are power plugs
+    results = asyncio.run(detect_power_plug_parallel(scan_results))
+    # now we have a list of tuples (ip, status_json)
+    # let's find the one with matching name
+    matching_ips = []  # tuple (ip, status_json)
+    for ip, status_json in results:
+        if status_json:
+            try:
+                if (
+                    name.lower() in status_json["Status"]["DeviceName"].lower()
+                    or name.lower() in status_json["Status"]["FriendlyName"][0].lower()
+                ):
+                    matching_ips.append((ip, status_json))
+            except KeyError:
+                pass
+    if len(matching_ips) == 0:
+        raise ValueError(f"No matching plug found for {name}")
+    if len(matching_ips) > 1:
+        devname_desc = [
+            f"({ip}, {status_json['Status']['DeviceName']}, {status_json['Status']['FriendlyName'][0]}, {status_json['StatusNET']['Mac']})"
+            for ip, status_json in matching_ips
+        ]
+        msg = f"Multiple matching plugs found for {name}: \n"
+        msg += "\n".join(devname_desc)
+        raise ValueError(msg)
+    return matching_ips[0][0]
+
+
 async def send_http_command(ip, command):
     """Send a command over HTTP to the power plug"""
     url = f"http://{ip}/cm"
@@ -471,10 +531,12 @@ def arg_parser():
         metavar=("WATT", "MILIAMPS", "VOLTS"),
         help="Setup power calibration on the power plug",
     )
-    parser.add_argument("--ip", type=str, help="IP of the power plug")
+    parser.add_argument(
+        "--ip", type=str, help="IP of the power plug. Mutually exclusive with --name"
+    )
     parser.add_argument("--command", type=str, help="Command to send to the power plug")
     parser.add_argument(
-        "--setup", metavar="IP", type=str, help="Setup the power plug using ini file"
+        "--setup", action="store_true", help="Setup the power plug using ini file"
     )
     parser.add_argument(
         "--generate-config",
@@ -503,6 +565,11 @@ def arg_parser():
     parser.add_argument(
         "--upgrade-firmware", action="store_true", help="Upgrade firmware"
     )
+    parser.add_argument(
+        "--name",
+        type=str,
+        help="Name of the power plug (device or friendly). Partial matches supported. Case insensitive. Mutually exclusive with --ip",
+    )
 
     return parser
 
@@ -512,6 +579,7 @@ def main():
     log.setLevel(logging.ERROR)
     parser = arg_parser()
     args = parser.parse_args()
+    ip = None  # we'll store IP here in case of name resolution to reuse it later
     if args.debug:
         log.setLevel(logging.DEBUG)
 
@@ -526,31 +594,46 @@ def main():
     if args.password:
         HTTP_AUTH_CREDS = (args.username, args.password)
 
+    if args.name:
+        if args.ip:
+            print("IP and name cannot be specified together", file=sys.stderr)
+            parser.print_help()
+            sys.exit(1)
+        try:
+            ip = name2ip(args.name)
+            print("Using IP: ", ip, file=sys.stderr)
+        except ValueError as ex:
+            print(ex, file=sys.stderr)
+            sys.exit(1)
+
+    if args.ip:
+        ip = args.ip
+
     if args.upgrade_firmware:
-        if not args.ip:
+        if not ip:
             print("IP is required for firmware upgrade")
             parser.print_help()
             sys.exit(1)
-        result = upgrade_firmware(args.ip)
+        result = upgrade_firmware(ip)
         if result is False:
             sys.exit(1)
         return
 
     if args.backup_config:
-        if not args.ip:
+        if not ip:
             print("IP is required for config backup")
             parser.print_help()
             sys.exit(1)
-        result = backup_config(args.ip)
+        result = backup_config(ip)
         if result is False:
             sys.exit(1)
         return
     if args.reset_counters:
-        if not args.ip:
+        if not ip:
             print("IP is required for counters reset")
             parser.print_help()
             sys.exit(1)
-        result = reset_counters(args.ip)
+        result = reset_counters(ip)
         if result is False:
             sys.exit(1)
         return
@@ -595,23 +678,27 @@ def main():
         return
 
     if args.power_calibration:
-        if not args.ip:
+        if not ip:
             print("IP is required for power calibration")
             parser.print_help()
             sys.exit(1)
-        power_calibration(args.ip, *args.power_calibration)
+        power_calibration(ip, *args.power_calibration)
         return
     if args.command:
-        if not args.ip:
+        if not ip:
             print("IP is required for sending a command")
             parser.print_help()
             sys.exit(1)
-        response = asyncio.run(send_http_command(args.ip, args.command))
+        response = asyncio.run(send_http_command(ip, args.command))
         response = json.dumps(response, indent=2)
         print(response)
         return
     if args.setup:
-        result = setup_plug(args.setup, sections=args.sections)
+        if not ip:
+            print("IP is required for setup", file=sys.stderr)
+            parser.print_help()
+            sys.exit(1)
+        result = setup_plug(ip, sections=args.sections)
         if result is False:
             sys.exit(1)
         return
