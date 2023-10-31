@@ -497,6 +497,33 @@ def get_host_networks():
     return networks
 
 
+def get_default_http_password():
+    """
+    sets default http auth from:
+    1. config file
+    2. environment
+    """
+    password = None
+    # env takes precedence
+    if os.environ.get("HTTP_AUTH_PASSWORD"):
+        log.debug("Using http auth from environment")
+        password = os.environ.get("HTTP_AUTH_PASSWORD")
+        return password
+    # config file
+    ini_file = os.path.join(CONFIG_DIR, DEFAULT_INI)
+    if os.path.isfile(ini_file):
+        config = configparser.ConfigParser()
+        config.read(ini_file)
+        try:
+            password = config["wifi"]["webpassword"]
+            log.debug("Using http auth from default config file")
+            return password
+        except KeyError as ex:
+            log.debug(f"No http auth password found in config file: {ex}")
+    log.debug("No http auth password found")
+    return password
+
+
 def arg_parser():
     import argparse
 
@@ -586,11 +613,13 @@ def main():
         DRY_RUN = True
         print("Dry run, no commands will be sent to the device.")
 
-    if os.environ.get("HTTP_AUTH_PASSWORD"):
-        log.debug("Using http auth from environment")
-        HTTP_AUTH_CREDS = ("admin", os.environ.get("HTTP_AUTH_PASSWORD"))
+    # try to guess password here and let it be overriden from cmdline later
+    password = get_default_http_password()
+    if password is not None:
+        HTTP_AUTH_CREDS = ("admin", password)
 
     if args.password:
+        log.debug("Using http auth from command line")
         HTTP_AUTH_CREDS = (args.username, args.password)
 
     if args.name:
