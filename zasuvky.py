@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
+""" Management module for tasmota power plugs (power plugs only and single socket only) """
+import sys
+import os
+import json
+import configparser
 import socket
 import ipaddress
 import logging
 import asyncio
 import time
 import aiohttp
-import sys
-import os
-import json
-import configparser
 import psutil
-import ipaddress
+
+# pylint: disable=logging-fstring-interpolation
 
 logging.basicConfig(
     level=logging.CRITICAL, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -28,12 +30,11 @@ DRY_RUN = False
 
 
 class HTTPCommandExeption(Exception):
-    pass
+    """Exception raised when HTTP command fails"""
 
 
 async def scan_host(host, port):
     """Scans one IP address for open port"""
-    running_loop = asyncio.get_running_loop()
     log.debug(f"Scanning {host}:{port}")
 
     async def _connect(host, port):
@@ -41,18 +42,17 @@ async def scan_host(host, port):
         writer.close()
         await writer.wait_closed()
 
-    open = False
+    port_open = False
     try:
-        result = await asyncio.wait_for(_connect(host, port), timeout=SCAN_TIMEOUT)
+        await asyncio.wait_for(_connect(host, port), timeout=SCAN_TIMEOUT)
         log.debug(f"{host}:{port} is OPEN")
-        open = True
-    except Exception as ex:
+        port_open = True
+    except Exception as ex:  # pylint: disable=broad-except
         err_str = str(ex)
         if not err_str and isinstance(ex, asyncio.TimeoutError):
             err_str = "timeout"
         log.debug(f"{host}:{port} is closed ({ex})")
-        pass
-    return (host, port, open)
+    return (host, port, port_open)
 
 
 async def scan(subnet, port):
@@ -98,7 +98,7 @@ async def detect_power_plug(ip):
     auth = None
     if HTTP_AUTH_CREDS:
         auth = aiohttp.BasicAuth(*HTTP_AUTH_CREDS)
-        log.debug(f"Using http auth.")
+        log.debug("Using http auth.")
     async with aiohttp.ClientSession(auth=auth) as session:
         try:
             async with session.get(url) as resp:
@@ -106,18 +106,18 @@ async def detect_power_plug(ip):
                     result = await resp.json()
                     log.debug(f"Response from {ip}: {result}")
                     try:
-                        for k, v in result["Status"].items():
+                        for k, _ in result["Status"].items():
                             if (
                                 k.lower().startswith("power")
                                 and len(k) <= len("power") + 1
                             ):  # power, power1 .. power 9
                                 log.info(f"Power plug detected at {ip}: {result}")
                                 return result
-                    except Exception as ex:
+                    except Exception as ex:  # pylint: disable=broad-except
                         log.debug(f"Error parsing response from {ip}: {ex}")
                 log.debug(f"Bad response from {ip}: {resp.status}: {resp.reason}")
 
-        except Exception as ex:
+        except Exception as ex:  # pylint: disable=broad-except
             log.debug(f"Error during power plug detection at {ip}: {ex}")
 
 
@@ -147,13 +147,17 @@ def power_calibration(ip, watt, miliamps, volts, save_to_ini=True):
                 config = configparser.ConfigParser()
                 timestamp = time.strftime("%Y%m%d-%H%M%S")
                 config.read(plug_ini)
-                config.write(open(plug_ini + f"-backup-{timestamp}", "w"))
+                with open(
+                    plug_ini + f"-backup-{timestamp}", "w", encoding="utf-8"
+                ) as _:
+                    config.write(_)
                 if "power" not in config.sections():
                     config["power"] = {}
                 config["power"]["powercal"] = str(cal_data["PowerCal"])
                 config["power"]["voltagecal"] = str(cal_data["VoltageCal"])
                 config["power"]["currentcal"] = str(cal_data["CurrentCal"])
-                config.write(open(plug_ini, "w"))
+                with open(plug_ini, "w", encoding="utf-8") as _:
+                    config.write(_)
                 print(f"Config file {plug_ini} updated.")
             else:
                 print(
@@ -161,7 +165,7 @@ def power_calibration(ip, watt, miliamps, volts, save_to_ini=True):
                     file=sys.stderr,
                 )
                 return False
-
+        return True
     except HTTPCommandExeption as ex:
         log.error(f"Error during power calibration {ip}: {ex}")
         print("Command failed: ", ex)
@@ -219,7 +223,9 @@ def name2ip(name, network=None):
         raise ValueError(f"No matching plug found for {name}")
     if len(matching_ips) > 1:
         devname_desc = [
-            f"({ip}, {status_json['Status']['DeviceName']}, {status_json['Status']['FriendlyName'][0]}, {status_json['StatusNET']['Mac']})"
+            f"({ip}, {status_json['Status']['DeviceName']}, "
+            f"{status_json['Status']['FriendlyName'][0]}, "
+            f"{status_json['StatusNET']['Mac']})"
             for ip, status_json in matching_ips
         ]
         msg = f"Multiple matching plugs found for {name}: \n"
@@ -236,7 +242,7 @@ async def send_http_command(ip, command):
     request_timeout = 5
     if HTTP_AUTH_CREDS:
         auth = aiohttp.BasicAuth(*HTTP_AUTH_CREDS)
-        log.debug(f"Using http auth.")
+        log.debug("Using http auth.")
     async with aiohttp.ClientSession(
         auth=auth, timeout=aiohttp.ClientTimeout(total=request_timeout)
     ) as session:
@@ -252,7 +258,9 @@ async def send_http_command(ip, command):
                 )
         except Exception as ex:
             log.debug(f"Error during command sending {ip}: {ex}")
-            raise HTTPCommandExeption(f"Error during command sending {ip}: {ex}")
+            raise HTTPCommandExeption(
+                f"Error during command sending {ip}: {ex}"
+            ) from ex
 
 
 def load_ini(mac):
@@ -304,7 +312,7 @@ def ini2commands(config, sections=None):
         config_sections.append("wifi")
     for section in config_sections:
         if section in sections_exclude or (
-            len(sections_include) and section not in sections_include
+            len(sections_include) > 0 and section not in sections_include
         ):
             log.debug(f"Skipping section {section}")
             continue
@@ -340,7 +348,8 @@ def generate_config_ini(ip):
 
     if not os.path.isdir(CONFIG_DIR):
         os.mkdir(CONFIG_DIR)
-    config.write(open(plug_ini, "w"))
+    with open(plug_ini, "w", encoding="utf-8") as _:
+        config.write(_)
     print(f"Config file {plug_ini} created")
 
 
@@ -350,56 +359,56 @@ def setup_plug(ip, sections=None):
     mac = get_mac(status)
     try:
         config = load_ini(mac)
-    except FileNotFoundError as ex:
-        log.info(f"Plug ini file not found, generating one.")
+    except FileNotFoundError:
+        log.info("Plug ini file not found, generating one.")
         log.warning(
-            "New config file was generated. Please make sure you run the power calibration for the powerplug!"
+            "New config file was generated. Please make sure you run "
+            "the power calibration for the powerplug!"
         )
         generate_config_ini(ip)
         config = load_ini(mac)
     commands = ini2commands(config, sections=sections)
     boot_count = int(status["StatusPRM"]["BootCount"])
     log.debug(f"Boot count: {boot_count}")
-    for command, restart_required in commands:
+    for command, restart_required in commands:  # pylint: disable=too-many-nested-blocks
         if DRY_RUN:
             print(f"would send command: {command}")
-        else:
-            print(f"Executing command: {command}")
-            asyncio.run(send_http_command(ip, command))
-            if restart_required:
-                print("Waiting for device restart.", end="", flush=True)
-                max_attempts = 10
-                delay = 1
-                time.sleep(
-                    2
-                )  # wait for the device to start the restart, it's not instant, 1s is the default delay, so let's put 2 here
-                while True:
-                    try:
-                        status = asyncio.run(send_http_command(ip, "status 0"))
-                        if status:
-                            if int(status["StatusPRM"]["BootCount"]) > boot_count:
-                                print("Device restarted")
-                                boot_count = int(status["StatusPRM"]["BootCount"])
-                                break
-                            else:
-                                log.debug(
-                                    f"Device responding, but has not restarted yet."
-                                )
+            return
+        print(f"Executing command: {command}")
+        asyncio.run(send_http_command(ip, command))
+        if restart_required:
+            print("Waiting for device restart.", end="", flush=True)
+            max_attempts = 10
+            delay = 1
+            # wait for the device to start the restart, it's not instant,
+            # 1s is the default delay, so let's put 2 here
+            time.sleep(2)
+            while True:
+                try:
+                    status = asyncio.run(send_http_command(ip, "status 0"))
+                    if status:
+                        if int(status["StatusPRM"]["BootCount"]) > boot_count:
+                            print("Device restarted")
+                            boot_count = int(status["StatusPRM"]["BootCount"])
+                            break
+                        log.debug("Device responding, but has not restarted yet.")
 
-                    except Exception as ex:
-                        log.debug(f"Error while waiting for device restart: {ex}")
-                    max_attempts -= 1
-                    if max_attempts == 0:
-                        print("Device restart timeout", file=sys.stderr)
-                        return False
-                    print(".", end="", flush=True)
-                    time.sleep(delay)
-                if max_attempts < 1:
-                    print(
-                        "Device setup failed. Could not connect to device after restart.",
-                        file=sys.stderr,
-                    )
-                    return False
+                except Exception as ex:  # pylint: disable=broad-except
+                    log.debug(f"Error while waiting for device restart: {ex}")
+                max_attempts -= 1
+                if max_attempts == 0:
+                    msg = "Device restart timeout"
+                    print(msg, file=sys.stderr)
+                    raise RuntimeError(msg)
+                print(".", end="", flush=True)
+                time.sleep(delay)
+            if max_attempts < 1:
+                msg = "Device setup failed. Could not connect to device after restart."
+                print(
+                    msg,
+                    file=sys.stderr,
+                )
+                raise RuntimeError(msg)
 
 
 def get_mac(status_json):
@@ -419,7 +428,8 @@ def reset_counters(ip):
         )
         log.debug(f"Reset counters result: {result}")
         print("Counters reset successfully")
-    except Exception as ex:
+        return True
+    except Exception as ex:  # pylint: disable=broad-except
         log.error(f"Error during counters reset {ip}: {ex}")
         print("Command failed: ", ex, file=sys.stderr)
         return False
@@ -432,7 +442,7 @@ def backup_config(ip):
     auth = None
     if HTTP_AUTH_CREDS:
         auth = aiohttp.BasicAuth(*HTTP_AUTH_CREDS)
-        log.debug(f"Using http auth.")
+        log.debug("Using http auth.")
     url = f"http://{ip}/dl"
     status = asyncio.run(send_http_command(ip, "status 0"))
     mac = get_mac(status)
@@ -453,7 +463,7 @@ def backup_config(ip):
                             f"Bad response from {ip}: {resp.status}: {resp.reason}",
                             file=sys.stderr,
                         )
-            except Exception as ex:
+            except Exception as ex:  # pylint: disable=broad-except
                 print(f"Error during config backup {ip}: {ex}", file=sys.stderr)
                 return False
 
@@ -463,7 +473,6 @@ def backup_config(ip):
 def upgrade_firmware(ip):
     """Upgrades firmware using the url stored in the power plug"""
     status = asyncio.run(send_http_command(ip, "status 0"))
-    mac = get_mac(status)
     url = status["StatusPRM"]["OtaUrl"]
     if not url:
         print("No upgrade url found", file=sys.stderr)
@@ -474,12 +483,14 @@ def upgrade_firmware(ip):
         return False
     print(f"Sending command to upgrade firmware from {url}")
     try:
-        result = asyncio.run(send_http_command(ip, f"Upgrade 1"))
+        result = asyncio.run(send_http_command(ip, "Upgrade 1"))
         log.debug(f"Upgrade result: {result}")
         print(
-            "Upgrade command sent successfully. Wait for the device to reboot, it might take a couple of minutes."
+            "Upgrade command sent successfully. Wait for the device to "
+            "reboot, it might take a couple of minutes."
         )
-    except Exception as ex:
+        return True
+    except Exception as ex:  # pylint: disable=broad-except
         log.error(f"Error during firmware upgrade {ip}: {ex}")
         print("Command failed: ", ex, file=sys.stderr)
         return False
@@ -530,7 +541,8 @@ def get_default_http_password():
 
 
 def arg_parser():
-    import argparse
+    """Argument parser"""
+    import argparse  # pylint: disable=import-outside-toplevel
 
     parser = argparse.ArgumentParser(
         description="Scans the network for open port and detects power plugs"
@@ -542,7 +554,8 @@ def arg_parser():
         nargs="?",
         const=True,
         default=None,
-        help="Scans the network/ip for available power plugs. Tries scanning current network if there is only one available.",
+        help="Scans the network/ip for available power plugs. Tries scanning "
+        "current network if there is only one available.",
     )
     parser.add_argument(
         "--username",
@@ -578,7 +591,8 @@ def arg_parser():
     parser.add_argument(
         "--sections",
         type=str,
-        help="Sections to process '!' negates the section, comma separated list. Default: all. Example: !wifi,management,!mqtt",
+        help="Sections to process '!' negates the section, comma separated "
+        "list. Default: all. Example: !wifi,management,!mqtt",
     )
     parser.add_argument(
         "--dry-run",
@@ -599,14 +613,17 @@ def arg_parser():
     parser.add_argument(
         "--name",
         type=str,
-        help="Name of the power plug (device or friendly). Partial matches supported. Case insensitive. Mutually exclusive with --ip",
+        help="Name of the power plug (device or friendly). Partial "
+        "matches supported. Case insensitive. Mutually exclusive with --ip",
     )
 
     return parser
 
 
 def main():
-    global HTTP_AUTH_CREDS, DRY_RUN
+    """Main function"""
+    # pylint: disable=too-many-branches,too-many-statements,too-many-return-statements
+    global HTTP_AUTH_CREDS, DRY_RUN  # pylint: disable=global-statement
     log.setLevel(logging.ERROR)
     parser = arg_parser()
     args = parser.parse_args()
@@ -678,7 +695,7 @@ def main():
             log.debug(f"Found networks: {networks}")
             if len(networks) != 1:
                 print(
-                    f"Could not determine the network to scan. Please specify the network to scan.",
+                    "Could not determine the network to scan. Please specify the network to scan.",
                     file=sys.stderr,
                 )
                 print(f"Available networks: {networks}", file=sys.stderr)
@@ -731,8 +748,11 @@ def main():
             print("IP is required for setup", file=sys.stderr)
             parser.print_help()
             sys.exit(1)
-        result = setup_plug(ip, sections=args.sections)
-        if result is False:
+        try:
+            setup_plug(ip, sections=args.sections)
+            print("Setup finished successfully")
+        except Exception as ex:  # pylint: disable=broad-except
+            print(f"Setup failed: {ex}", file=sys.stderr)
             sys.exit(1)
         return
     if args.generate_config:
