@@ -331,8 +331,13 @@ def generate_config_ini(ip):
         return
     config = configparser.ConfigParser()
     config["management"] = {}
-    config["management"]["devicename"] = f"Zasuvka-{mac[-6:]}"
-    config["management"]["friendlyname"] = f"Zasuvka-{mac[-6:]}"
+    config["management"]["devicename"] = status["Status"]["DeviceName"]
+    config["management"]["friendlyname"] = status["Status"]["FriendlyName"][0]
+    config["power"] = {}
+    for command in ["PowerCal", "VoltageCal", "CurrentCal"]:
+        result = asyncio.run(send_http_command(ip, command))
+        config["power"][command.lower()] = str(result[command])
+
     if not os.path.isdir(CONFIG_DIR):
         os.mkdir(CONFIG_DIR)
     config.write(open(plug_ini, "w"))
