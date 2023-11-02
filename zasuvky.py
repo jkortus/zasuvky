@@ -220,7 +220,7 @@ def name2ip(name, network=None):
             except KeyError:
                 pass
     if len(matching_ips) == 0:
-        raise ValueError(f"No matching plug found for {name}")
+        raise ValueError(f"No matching plug found for '{name}'")
     if len(matching_ips) > 1:
         devname_desc = [
             f"({ip}, {status_json['Status']['DeviceName']}, "
@@ -332,6 +332,7 @@ def ini2commands(config, sections=None):
 def generate_config_ini(ip):
     """generates basic configuration for the power plug that we want to edit later"""
     status = asyncio.run(send_http_command(ip, "status 0"))
+    default_name = "Tasmota"
     mac = get_mac(status)
     plug_ini = os.path.join(CONFIG_DIR, f"{mac}.ini")
     if os.path.isfile(plug_ini):
@@ -341,6 +342,11 @@ def generate_config_ini(ip):
     config["management"] = {}
     config["management"]["devicename"] = status["Status"]["DeviceName"]
     config["management"]["friendlyname"] = status["Status"]["FriendlyName"][0]
+    # append last 6 digits of mac to the name if it is the default one
+    if config["management"]["friendlyname"] == default_name:
+        config["management"]["friendlyname"] = default_name + "-" + mac[-6:]
+    if config["management"]["devicename"] == default_name:
+        config["management"]["devicename"] = default_name + "-" + mac[-6:]
     config["power"] = {}
     for command in ["PowerCal", "VoltageCal", "CurrentCal"]:
         result = asyncio.run(send_http_command(ip, command))
@@ -540,6 +546,58 @@ def get_default_http_password():
     return password
 
 
+def calibrate_as(source, destination, save_to_ini=True):
+    """
+    Calibrates new power plug from reading of an already calibrated one.
+    This assumes the plugs are plugged into each other.
+    Source and destinations are plug specs (name or IP).
+    """
+    try:
+        source_ip = plug_spec_to_ip(source)
+        destination_ip = plug_spec_to_ip(destination)
+    except ValueError as ex:
+        msg = (
+            f"Error during calibration. Could not convert {source} or {destination} "
+            f"to single IP address: {ex}"
+        )
+        log.error(msg)
+        print(msg, file=sys.stderr)
+        return False
+    try:
+        status = asyncio.run(send_http_command(source_ip, "status 0"))
+        power = float(status["StatusSNS"]["ENERGY"]["Power"])
+        voltage = float(status["StatusSNS"]["ENERGY"]["Voltage"])
+        current = (
+            float(status["StatusSNS"]["ENERGY"]["Current"]) * 1000
+        )  # need mA, getting A
+        log.debug(f"Calibration data: {power}W {voltage}V {current}mA")
+        return power_calibration(
+            destination_ip, power, current, voltage, save_to_ini=save_to_ini
+        )
+    except Exception as ex:  # pylint: disable=broad-except
+        log.error(f"Error during calibration: {ex}")
+        print("Command failed: ", ex, file=sys.stderr)
+        return False
+
+
+def plug_spec_to_ip(plug_spec, network=None):
+    """Takes in name (string) or an IP adress and returns IP adress"""
+    try:
+        ipaddress.ip_address(plug_spec)
+        log.debug(f"{plug_spec} is an IP address")
+        return plug_spec
+    except ValueError as ex_1:
+        try:
+            ip = name2ip(plug_spec, network=network)
+        except ValueError as ex_2:
+            msg = f"Could not convert {plug_spec} to IP address: {ex_2}"
+            log.error(msg)
+            print(msg, file=sys.stderr)
+            raise ValueError(msg) from ex_1
+        log.debug(f"{plug_spec} resolved to {ip}")
+        return ip
+
+
 def arg_parser():
     """Argument parser"""
     import argparse  # pylint: disable=import-outside-toplevel
@@ -549,11 +607,7 @@ def arg_parser():
     )
     parser.add_argument(
         "--scan",
-        type=str,
-        metavar="IP spec",
-        nargs="?",
-        const=True,
-        default=None,
+        action="store_true",
         help="Scans the network/ip for available power plugs. Tries scanning "
         "current network if there is only one available.",
     )
@@ -575,9 +629,6 @@ def arg_parser():
         nargs=3,
         metavar=("WATT", "MILIAMPS", "VOLTS"),
         help="Setup power calibration on the power plug",
-    )
-    parser.add_argument(
-        "--ip", type=str, help="IP of the power plug. Mutually exclusive with --name"
     )
     parser.add_argument("--command", type=str, help="Command to send to the power plug")
     parser.add_argument(
@@ -610,11 +661,24 @@ def arg_parser():
     parser.add_argument(
         "--upgrade-firmware", action="store_true", help="Upgrade firmware"
     )
+
     parser.add_argument(
-        "--name",
+        "--calibrate-as",
         type=str,
-        help="Name of the power plug (device or friendly). Partial "
-        "matches supported. Case insensitive. Mutually exclusive with --ip",
+        metavar="IP",
+        help="Calibrate new power plug from reading of an already calibrated one. ",
+    )
+    parser.add_argument(
+        "--plug",
+        type=str,
+        metavar="IP or name",
+        help="IP or name of the power plug.",
+    )
+    parser.add_argument(
+        "--network",
+        type=str,
+        metavar="IP Network",
+        help="IP network to scan. Example: 192.168.1.0/24",
     )
 
     return parser
@@ -644,20 +708,9 @@ def main():
         log.debug("Using http auth from command line")
         HTTP_AUTH_CREDS = (args.username, args.password)
 
-    if args.name:
-        if args.ip:
-            print("IP and name cannot be specified together", file=sys.stderr)
-            parser.print_help()
-            sys.exit(1)
-        try:
-            ip = name2ip(args.name)
-            print("Using IP: ", ip, file=sys.stderr)
-        except ValueError as ex:
-            print(ex, file=sys.stderr)
-            sys.exit(1)
-
-    if args.ip:
-        ip = args.ip
+    if args.plug:
+        ip = plug_spec_to_ip(args.plug, args.network)
+        print(f"Using IP {ip}", file=sys.stderr)
 
     if args.upgrade_firmware:
         if not ip:
@@ -689,8 +742,11 @@ def main():
         return
 
     if args.scan:
-        if args.scan is True:
-            # present with no argument - let's find the network
+        network = args.network
+        if ip is not None:
+            network = ip + "/32"
+        if network is None:
+            # no --network argument - let's find the network
             networks = get_host_networks()
             log.debug(f"Found networks: {networks}")
             if len(networks) != 1:
@@ -701,9 +757,8 @@ def main():
                 print(f"Available networks: {networks}", file=sys.stderr)
                 sys.exit(1)
             network = networks[0]
-        else:
-            network = args.scan
-        print(f"Scanning network {network}")
+
+        print(f"Scanning network {network}", file=sys.stderr)
         # scan for open ports, these are plug candidates
         result = asyncio.run(scan(network, 80))
         # for all candidates, try to detect if they are power plugs
@@ -762,6 +817,15 @@ def main():
             sys.exit(1)
         generate_config_ini(ip)
         return
+    if args.calibrate_as:
+        if not ip:
+            print("IP is required for calibration", file=sys.stderr)
+            parser.print_help()
+            sys.exit(1)
+        if not calibrate_as(source=args.calibrate_as, destination=ip):
+            sys.exit(1)
+        return
+
     parser.print_help()
     sys.exit(1)
     # http://<ip>/cm?user=admin&password=joker&cmnd=Power%20Toggle
