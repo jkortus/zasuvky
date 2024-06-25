@@ -1,0 +1,48 @@
+0. edit config/defaults.ini
+1. connect to plug wifi
+2. $ ./zasuvky.py --plug 192.168.4.1 --generate-config
+   Using IP 192.168.4.1
+   Config file config/485519183C31.ini created
+3. edit the config file
+4. $ ./zasuvky.py --plug 192.168.4.1 --setup --sections '!mqtt'
+   Using IP 192.168.4.1
+   Executing command: Backlog devicename Zasuvka-183C31;friendlyname Zasuvka-183C31;
+   Executing command: Backlog powercal 12530;voltagecal 1950;currentcal 3500;
+   Executing command: Backlog ssid1 xxxxx;password1 xxxx;webpassword xxxx;
+   Setup finished successfully
+5. device will reconnect to new wifi after a while and our current connection to the default wifi drops
+6. ./zasuvky.py --scan
+   [...]
+   Power plug detected at 192.168.1.227: 324 W DeviceName: Zasuvka-183C31 FriendlyName: Zasuvka-183C31 MAC: 48:55:19:18:3C:31 Version: 12.1.1(tasmota)
+   [...]
+7. $ ./zasuvky.py --plug zasuvka --calibrate-as svetlo
+   7.1. $ ./zasuvky.py --plug zasuvka --reset-counters
+8. $ ./zasuvky.py --scan
+   verify the power readings match
+9. set it up for mqtt so it finally appears in our homeassistant ;)
+10. Power calibration is required by default for the new plug. If you have one plug already set up
+    you can use it and calibrate the new plug through it. Just plug the new one into the old one,
+    plug in some constant moderate load (like a halogen lamp) and use
+    --plug <new-plug-ip> --calibrate-as <old-plug-ip>
+
+INI entries are as in tasmota manual (https://tasmota.github.io/docs/Commands/)
+Example defaults.ini (change IP for your own MQTT!):
+[wifi]
+ssid1 = wifi-ap-name
+password1 = your-wifi-password
+webpassword = password-for-plug-http-interface
+
+[mqtt]
+mqtthost = 192.168.1.222
+mqttport = 1883
+teleperiod = 10
+
+Example per-plug config (power calibration needed as per plug manual):
+[management]
+devicename = Tasmota-43B777
+friendlyname = Tasmota-43B777
+
+[power]
+powercal = 9887
+voltagecal = 1537
+currentcal = 3377
