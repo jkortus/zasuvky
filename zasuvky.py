@@ -20,7 +20,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-SCAN_TIMEOUT = 0.5
+SCAN_TIMEOUT = 1
 DEFAULT_INI = "defaults.ini"
 CONFIG_DIR = "config"
 BACKUP_DIR = "backup"
@@ -379,7 +379,7 @@ def setup_plug(ip, sections=None):
     for command, restart_required in commands:  # pylint: disable=too-many-nested-blocks
         if DRY_RUN:
             print(f"would send command: {command}")
-            return
+            continue
         print(f"Executing command: {command}")
         asyncio.run(send_http_command(ip, command))
         if restart_required:
