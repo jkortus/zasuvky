@@ -15,15 +15,13 @@
    [...]
    Power plug detected at 192.168.1.227: 324 W DeviceName: Zasuvka-183C31 FriendlyName: Zasuvka-183C31 MAC: 48:55:19:18:3C:31 Version: 12.1.1(tasmota)
    [...]
-7. $ ./zasuvky.py --plug zasuvka --calibrate-as svetlo
-   7.1. $ ./zasuvky.py --plug zasuvka --reset-counters
-8. $ ./zasuvky.py --scan
+7. $ ./zasuvky.py --scan
    verify the power readings match
-9. set it up for mqtt so it finally appears in our homeassistant ;)
-10. Power calibration is required by default for the new plug. If you have one plug already set up
-    you can use it and calibrate the new plug through it. Just plug the new one into the old one,
-    plug in some constant moderate load (like a halogen lamp) and use
-    --plug <new-plug-ip> --calibrate-as <old-plug-ip>
+8. set it up for mqtt so it finally appears in our homeassistant ;)
+9. Power calibration is required by default for the new plug. If you have one plug already set up
+   you can use it and calibrate the new plug through it. Just plug the new one into the old one,
+   plug in some constant moderate load (like a halogen lamp) and use
+   --plug <new-plug-ip> --calibrate-as <old-plug-ip>
 
 INI entries are as in tasmota manual (https://tasmota.github.io/docs/Commands/)
 Example defaults.ini (change IP for your own MQTT!):
